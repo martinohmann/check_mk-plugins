@@ -1,0 +1,84 @@
+#!/usr/bin/python
+# -*- encoding: utf-8; py-indent-offset: 4 -*-
+#
+# The MIT License (MIT)
+# Copyright (c) 2016 Martin Ohmann <martin@mohmann.de>
+# 
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# 
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+# 
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+# <<<wordpress_updates>>>
+# wp.example.com OK 9 1 4.4.2:[de_DE] 4 adminimize,akismet,magic-fields-2,polylang 3 twentyfourteen,twentythirteen,twentytwelve 1 twentytwelve
+# wp2.example.com OK 0 0 - 0 - 0 - 0 -
+# wp3.example.com OK 3 0 - 1 akismet 2 twentyfourteen,twentythirteen 0 -
+
+def inventory_wordpress_updates(info):
+    inventory = []
+    for line in info:
+        inventory.append((line[0], None))
+    return inventory
+
+# 0 = OK, 1 = WARN, 2 = CRIT, 3 = UNKN
+def check_wordpress_updates(item, params, info):
+    for line in info:
+        if item != line[0]:
+            continue
+
+        site = line[0]
+        status = line[1]
+        updates = int(line[2])
+        core_updates = int(line[3])
+        core_version = line[4]
+        plugin_updates = int(line[5])
+        plugins = line[6].replace(',', ", ")
+        theme_updates = int(line[7])
+        themes = line[8].replace(',', ", ")
+        translation_updates = int(line[9])
+        translations = line[10].replace(',', ", ")
+        
+        if status == "NOK":
+            return (2, "update check failed")
+
+        if updates > 0:
+            parts = []
+
+            if core_updates > 0:
+                parts.append("core (%s)" % core_version)
+
+            if plugin_updates > 0:
+                parts.append("%d plugins (%s)" % (plugin_updates, plugins))
+
+            if theme_updates > 0:
+                parts.append("%d themes (%s)" % (theme_updates, themes))
+
+            if translation_updates > 0:
+                parts.append("%d translations (%s)" % 
+                        (translation_updates, translations))
+
+            return (1, "%d updates available: %s" % (updates, ", ".join(parts)))
+
+        return (0, "no updates available")
+        
+    return (3, "site not found in agent output")
+
+check_info['wordpress_updates'] = {
+    "check_function"          : check_wordpress_updates,
+    "inventory_function"      : inventory_wordpress_updates,
+    "service_description"     : "Wordpress Updates %s",
+    "has_perfdata"            : False,
+}

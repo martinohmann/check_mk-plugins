@@ -1,0 +1,306 @@
+#!/usr/bin/php
+<?php
+/**
+ * The MIT License (MIT)
+ * Copyright (c) 2016 Martin Ohmann <martin@mohmann.de>
+ * 
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ * 
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ * 
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
+ */
+/**
+ * it is advised to execute this script in a greater interval than the default 
+ * check interval. to check for updates once an hour put it in
+ * /usr/lib/check_mk_agent/plugins/3600/.
+ *
+ * config files are in ini-format with one section per wordpress instance. each
+ * site consists of a name which is displayed in the check output and the path
+ * to the wordpress installation (where wp-load.php is situated).
+ *
+ * config file section example:
+ *
+ *   [some-site-name]
+ *   name = site.example.com
+ *   path = /var/www/site.example.com/public_html
+ */
+$config_files = array(
+  sprintf("%s/.wordpress_updates.cfg", getenv('HOME')),
+  sprintf("%s/wordpress_updates.cfg", getenv('MK_CONFDIR')),
+  "/etc/check_mk/wordpress_updates.cfg"
+);
+
+final class Wordpress_Updates {
+  /**
+   * constants
+   */
+  const NO_UPDATES = "0 -";
+  const STATUS_OK = 0;
+  const STATUS_ERROR = 1;
+  const STATUS_WARN = 2;
+
+  /**
+   * site config files
+   */
+  private $config_files = array();
+
+  /**
+   * array of site configs
+   */
+  private $sites = array();
+
+  /**
+   * instance holder
+   */
+  protected static $instance = null;
+
+  /**
+   * singleton
+   */
+  private function __construct() {}
+
+  /**
+   * factory
+   */
+  public static function get_instance() {
+    if (self::$instance === null) {
+      self::$instance = new self();
+    }
+    return self::$instance;
+  }
+
+  /**
+   * set config files
+   */
+  public function set_config_files($config_files) {
+    $this->config_files = $config_files;
+  }
+
+  /**
+   * parse sites from ini file 
+   */
+  private function _parse_site_config() {
+    foreach ($this->config_files as $config_file) {
+      if (is_file($config_file) && is_readable($config_file)) {
+        if (false !== ($config = parse_ini_file($config_file, true))) {
+          $this->sites = $config;
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * format update output
+   */
+  public static function format($updates = false) {
+    if (is_array($updates)) {
+      if (($count = count($updates)) > 0) {
+        return sprintf("%d %s", $count, join($updates, ','));
+      }
+    } else if ($updates !== false) {
+      return sprintf("1 %s", $updates);
+    }
+    return self::NO_UPDATES;
+  }
+
+  /**
+   * print check_mk_agent section header
+   */
+  public static function print_section_header() {
+    printf("<<<wordpress_updates>>>\n");
+  }
+
+  /**
+   * get sanitized site attributes 
+   */
+  private function _get_site_attrs($site_id) {
+    if ($site_id === '' || !array_key_exists($site_id, $this->sites)) {
+      return false;
+    }
+
+    $site = $this->sites[$site_id];
+
+    if (!array_key_exists('name', $site) || !array_key_exists('path', $site)) {
+      return false;
+    }
+    return $site;
+  }
+
+  /**
+   * check updates for site
+   */
+  private function _check_site($site_id) {
+    $site_attrs = $this->_get_site_attrs($site_id);
+
+    if ($site_attrs === false) {
+      return self::STATUS_ERROR;
+    }
+
+    $site_name = $site_attrs['name'];
+    $site_path = $site_attrs['path'];
+
+    $wp_load = sprintf("%s/wp-load.php", $site_path);
+
+    if (!is_dir($site_path) || !is_file($wp_load)) {
+      return self::STATUS_ERROR;
+    }
+
+    $update_core = false;
+    $update_plugins = array();
+    $update_themes = array();
+    $update_translations  = array();
+     
+    require_once($wp_load);
+
+    global $wp_version;
+     
+    wp_update_plugins();
+    wp_version_check();
+    wp_update_themes();
+     
+    $core = get_site_transient('update_core');
+    $plugins = get_site_transient('update_plugins');
+    $themes = get_site_transient('update_themes');
+
+    if ($plugins) {
+      foreach($plugins->response as $plugin) {
+        $update_plugins[] = $plugin->slug;
+      }
+    }
+    
+    if ($themes) {
+      foreach($themes->response as $theme) {
+        $update_themes[] = $theme['theme'];
+      }
+      foreach($themes->translations as $translation) {
+        $update_translations[] = $translation['slug'];
+      }
+    }
+
+    if ($core) {
+      $arr_core = $core->updates;
+      if (is_array($arr_core) && $arr_core[0]) {
+        $obj_core = $arr_core[0];
+        if ($obj_core->response && $obj_core->response != "latest") {
+          $update_core = sprintf("%s:%s", 
+            $obj_core->current, $obj_core->locale);
+        }
+      }
+    }
+     
+    /* sum updates */
+    $update_count = $update_core !== false ? 1 : 0;
+    $update_count += count($update_plugins);
+    $update_count += count($update_themes); 
+    $update_count += count($update_translations);
+
+    /* output aggregated data */
+    printf("%s OK %d %s %s %s %s\n", $site_name, $update_count, 
+      self::format($update_core), self::format($update_plugins),
+      self::format($update_themes), self::format($update_translations));
+
+    return self::STATUS_OK;
+  }
+
+  /**
+   * check updates for all sites 
+   */
+  private function _check_all_sites($args) {
+    self::print_section_header();
+
+    $status = self::STATUS_OK;
+
+    foreach ($this->sites as $site_id => $site_attrs) {
+      /* get validated attrs */
+      $site_attrs = $this->_get_site_attrs($site_id);
+
+      /* do not process sites with invalid attrs */
+      if ($site_attrs === false) {
+        $status = self::STATUS_WARN;
+        continue;
+      }
+
+      /* run check in subprocess to avoid name clashes of wordpress 
+       * functions caused if we include multiple different versions 
+       * of wp-load.php */
+      $handle = popen(sprintf("%s \"%s\"", realpath($args[0]), $site_id), "r");
+      $output = array();
+
+      while (!feof($handle)) {
+        $output[] = fread($handle, 1024);
+      }
+
+      fclose($handle);
+
+      $site_name = $site_attrs['name'];
+      /* 
+       * we expect one single line of output with the site name 
+       * at first position. if this is not the case the output is
+       * invalid, sanitize it.
+       */
+      if (strpos($output[0], $site_name) !== 0) {
+        $output[0] = sprintf("%s NOK %d %s %s %s %s\n", $site_name, 0, 
+          self::NO_UPDATES, self::NO_UPDATES, 
+          self::NO_UPDATES, self::NO_UPDATES);
+
+        $status = self::STATUS_WARN;
+      }
+      print $output[0];
+    }
+    return $status;
+  }
+
+  /**
+   * run update checks
+   */
+  public function run($args) {
+    if ($this->_parse_site_config() === false) {
+      return self::STATUS_ERROR;
+    }
+
+    if (count($args) < 2) {
+      $status = $this->_check_all_sites($args);
+    } else {
+      $status = $this->_check_site($args[1]);
+    }
+    return $status;
+  }
+}
+
+/**
+ * restrict access to cli 
+ */
+if (php_sapi_name() !== "cli") {
+  exit(1);
+}
+
+ini_set("memory_limit", "100M");
+
+/**
+ * set remote address to localhost. wordpress plugins like wp-maintenance-mode
+ * (if enabled) would exit on init if we fail to match their whitelist. this
+ * would prevent execution of the update checks. in order to make update checks
+ * work you should whitelist 127.0.0.1 in the plugins' settings.
+ */
+$_SERVER['REMOTE_ADDR'] = "127.0.0.1";
+
+$inst = Wordpress_Updates::get_instance();
+$inst->set_config_files($config_files);
+
+exit($inst->run($_SERVER['argv']));
+
